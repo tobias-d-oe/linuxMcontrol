@@ -1,0 +1,216 @@
+#!/usr/bin/python
+
+# imoprt required modules
+import socket
+import sys
+import getopt
+import xml.etree.ElementTree as ET
+import json
+import traceback
+import logging
+import logging.handlers
+import time
+import requests
+import chardet
+import os
+
+
+reload(sys)
+sys.setdefaultencoding('utf-8')
+
+# Setup default variables
+conf={}
+conf['listenPort'] = 8086
+conf['listenIP'] = '0.0.0.0'
+conf['DEBUG'] = 0
+conf['mctlDefFile'] = '/etc/linuxMcontrol/linuxMcontrolServer.xml'
+
+
+
+def logmsg(msg,error=False):
+    if error == False:
+        logger.info(msg)
+    else:
+        logger.error(msg)
+
+
+def debugmsg(msg):
+    if conf['DEBUG'] == 1:
+        print "DEBUG: - Linux-Response - %s" % (time.time())
+        print "----------"
+        print msg
+        print "----------"
+
+
+def readConfig(configfile):
+    try:
+        with open(configfile) as configuration:
+            for line in configuration:
+                if line.strip().startswith('#') or len(line.strip()) < 1:
+                    continue
+                name, var = line.partition("=")[::2]
+                name = name.strip()
+                var = var.strip()
+                if name == "listenPort" or name == "DEBUG":
+                    conf[name] = int(var)
+                else:
+                    conf[name] = var
+    except:
+        logmsg("Configuration file could not be opened",True)
+        sys.exit()
+
+
+def translateGetStates(root,cmdname):
+    element=root.find("./GetStates/Command[@name='%s']" % cmdname)
+    linuxcmd=element.find('cmd').text
+    return linuxcmd
+
+
+def translateExecuteCommand(root,cmdname):
+    try:
+        element=root.find("./ExecuteCommand/Command[@name='%s']" % cmdname)
+        linuxcmd=element.find('cmd').text
+    except:
+        commandbase=cmdname.split('.')
+        commandvalue=commandbase[2]
+        commandbase=commandbase[0]+'.'+commandbase[1]+'.*'
+        element=root.find("./ExecuteCommand/Command[@name='%s']" % commandbase)
+        linuxcmd=element.find('cmd').text
+        linuxcmd=element.find('cmd').text
+        linuxcmd=linuxcmd.replace('@',commandvalue)
+    return linuxcmd
+
+
+def createmsgpack(message):
+    XMLResponse='XML\n'
+    xmllen=len(message)
+    LEN="%08d" % (xmllen,)
+    XMLResponse=XMLResponse+LEN+'\n'+message
+    return XMLResponse
+
+
+def msgprocess(message):
+    debugmsg(message)
+    tree = ET.fromstring(str(message))
+    RequestType=tree[0].attrib['name']
+    XMLResponse= '<?xml version="1.0"?>\n<mctrlmessage>\n<response>\n'
+    if RequestType == 'ExecuteCommand':
+        for child in tree[0]:
+            linuxcmd=translateExecuteCommand(definitions,child.attrib['value'])
+            logmsg("Execute Command requested: %s" % (linuxcmd))
+            debugmsg(linuxcmd)
+            try:
+                execute_command(linuxcmd)
+                linuxexec = "success"
+            except:
+                linuxexec = "error"
+            XMLResponse=XMLResponse+'<return name="status" value="'+linuxexec+'" />\n' 
+    elif RequestType == 'GetStates':
+        for child in tree[0]:
+            name=child.attrib['name']
+            linuxcmd = translateGetStates(definitions,child.attrib['value']) 
+            logmsg("GetState Command requested: %s" % (linuxcmd))
+            try:
+                linuxstate = get_linuxstate(linuxcmd)
+            except:
+                linuxstate = 'error'
+            XMLResponse=XMLResponse+'<return name="'+name+'" value="%s" />\n' % (linuxstate)
+    XMLResponse= XMLResponse + "</response>\n</mctrlmessage>\n"
+    return createmsgpack(XMLResponse)
+
+
+
+def get_linuxstate(linuxcmd):
+    stream = os.popen(linuxcmd)
+    output = stream.read()
+    return output.strip()
+
+def execute_command(linuxcmd):
+    stream = os.popen(linuxcmd)
+    return "success"
+
+def usage():
+    usagemsg="""
+linuxMcontrolServer v. 0.1 -  mediola gateway for linux  - (c) Tobias D. Oestreicher
+------------------------------------------------------------------------------------
+Usage:
+  linuxMcontrolServer [options]
+
+Options:
+  -c <configfile>       : define the configurationfile for the daemon
+  -d                    : enable debug output to stdout
+  -h                    : shows this helpmessage
+
+Example:
+  linuxMcontrolServer -c /etc/linuxMcontrol/linuxMcontrol.cfg
+-----------------------------------------------------------------------------------
+"""
+    return usagemsg
+
+
+
+
+
+
+
+# setup logging to syslog
+logger = logging.getLogger('linuxMcontrolLogger')
+logger.setLevel(logging.DEBUG)
+handler = logging.handlers.SysLogHandler(address = '/dev/log')
+logformat = logging.Formatter('linuxMcontrol: %(message)s')
+handler.setFormatter(logformat)
+logger.addHandler(handler)
+
+
+# parse commandline arguments
+configfile=''
+myopts, args = getopt.getopt(sys.argv[1:],"c:hd")
+
+
+for o, a in myopts:
+    if o == '-c':
+        configfile=a
+    elif o == '-d':
+        conf['DEBUG']=1
+    else:
+        print(usage())
+        sys.exit()
+
+# read settings from configfile
+if configfile:
+    readConfig(configfile)
+
+
+# read definition file
+deftree = ET.parse(conf['mctlDefFile'])
+definitions = deftree.getroot()
+
+# create a TCP/IP socket
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+server_address = (conf['listenIP'], conf['listenPort'])
+logmsg("Starting up on %s with port %s" % server_address)
+sock.bind(server_address)
+
+try:
+    sock.listen(1)
+    
+    while True:
+        logmsg("Wait for connection")
+        connection, client_address = sock.accept()
+        try:
+            logmsg("Connection from %s" % str(connection.getpeername()[0]))
+            recdata=''
+            mcontrolheader = connection.recv(15)
+            mcontrollen = int(connection.recv(9))+1
+            recdata = connection.recv(int(mcontrollen))
+            responsestr=msgprocess(recdata)
+            debugmsg(responsestr)
+            connection.sendall(responsestr)
+            logmsg("Responding Client %s" % str(connection.getpeername()[0]))    
+        finally:
+            connection.close()
+except KeyboardInterrupt:
+    logmsg("Shutting down linuxMcontrol Server")
+except Exception:
+    traceback.print_exc(file=sys.stdout)
+sys.exit(0)

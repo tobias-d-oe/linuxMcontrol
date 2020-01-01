@@ -1,0 +1,10 @@
+[Unit]
+Description=linuxMcontrol server daemon
+
+[Service]
+ExecStart=/usr/bin/linuxMcontrolServer -c /etc/linuxMcontrol/linuxMcontrol.cfg
+IgnoreSIGPIPE=false
+
+[Install]
+WantedBy=multi-user.target
+

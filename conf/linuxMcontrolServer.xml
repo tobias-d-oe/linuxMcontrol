@@ -1,0 +1,21 @@
+<mctl>
+
+
+	<ExecuteCommand>
+
+		<Command name="Shell.SystemCmd.touch">
+			<cmd>touch /tmp/test0815</cmd>
+		</Command>
+	</ExecuteCommand>
+
+
+
+	<GetStates>
+
+		<Command name="Shell.SystemCmdUptime">
+			<cmd>/usr/bin/uptime</cmd>
+		</Command>
+	</GetStates>
+
+
+</mctl>
